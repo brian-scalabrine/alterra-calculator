@@ -46,6 +46,20 @@ def fee_methodology_note(fee_rate_pct):
     )
 
 
+def summary_stats_footnotes(fee_rate_pct):
+    """Footnotes for summary stats marked with an asterisk."""
+    return (
+        "* Weighted Avg Rate: Σ(Rate × DTE × Box Amount) ÷ Σ(DTE × Box Amount), "
+        "rows with Box Amount > 0 only.\n\n"
+        "* Weighted Avg APR: Weighted Avg Rate + Annual Fee Rate "
+        f"({fee_rate_pct:.2f}%).\n\n"
+        "* Weighted Avg DTE: Σ(DTE × Box Amount) ÷ Σ(Box Amount), "
+        "rows with Box Amount > 0 only.\n\n"
+        f"* Total Fees: Sum of upfront fees per row (Annual Fee Rate {fee_rate_pct:.2f}% "
+        "× DTE ÷ 365 × Funded Amount)."
+    )
+
+
 def calculate_gross_funded(loan_amount, rate_pct, dte):
     """Gross funded amount before upfront fee."""
     if loan_amount > 0 and rate_pct > 0 and dte > 0:
@@ -71,7 +85,7 @@ def calculate_net_proceeds(funded_amount, dte, annual_fee_rate=None):
 
 
 def build_loan_dataframe(df, loan_inputs, today):
-    """Build the full loan table from session-state loan amounts."""
+    """Build the full loan table from session-state box amounts."""
     loan_data = []
     annual_fee_rate = get_annual_fee_rate()
     for _, row in df.iterrows():
@@ -89,7 +103,7 @@ def build_loan_dataframe(df, loan_inputs, today):
         net_proceeds = calculate_net_proceeds(funded_amount, dte, annual_fee_rate)
         loan_data.append({
             'Maturity Date': date_str,
-            'Loan Amount ($)': loan_amount,
+            'Box Amount ($)': loan_amount,
             'DTE': int(dte),
             'Rate (%)': effective_yield,
             'Funded Amount ($)': funded_amount,
@@ -349,7 +363,7 @@ st.markdown("""
         text-transform: uppercase;
     }
 
-    /* Loan Amount column highlight (2nd column; canvas grid uses background overlay) */
+    /* Box Amount column highlight (2nd column; canvas grid uses background overlay) */
     [data-testid="stDataEditor"] {
         position: relative;
         border-radius: 8px;
@@ -476,7 +490,7 @@ if page == "Loan Structure":
                 st.subheader("Loan Structure")
                 st.markdown(
                     '<div class="loan-input-callout">'
-                    '<span>Input</span> Edit <strong>Loan Amount ($)</strong> — '
+                    '<span>Input</span> Edit <strong>Box Amount ($)</strong> — '
                     'outlined column in the table below'
                     '</div>',
                     unsafe_allow_html=True,
@@ -491,8 +505,8 @@ if page == "Loan Structure":
                             disabled=True,
                             width="small",
                         ),
-                        "Loan Amount ($)": monetary_column(
-                            "Loan Amount ($)",
+                        "Box Amount ($)": monetary_column(
+                            "Box Amount ($)",
                             min_value=0.0,
                         ),
                         "DTE": st.column_config.NumberColumn(
@@ -522,7 +536,7 @@ if page == "Loan Structure":
                     },
                     column_order=[
                         "Maturity Date",
-                        "Loan Amount ($)",
+                        "Box Amount ($)",
                         "DTE",
                         "Rate (%)",
                         "Funded Amount ($)",
@@ -538,7 +552,7 @@ if page == "Loan Structure":
                 loan_inputs_changed = False
                 for _, row in edited_df.iterrows():
                     date_str = row['Maturity Date']
-                    loan_amount = row['Loan Amount ($)']
+                    loan_amount = row['Box Amount ($)']
                     if pd.isna(loan_amount):
                         continue
                     loan_amount = round_currency(loan_amount)
@@ -553,20 +567,20 @@ if page == "Loan Structure":
                 edited_df = build_loan_dataframe(df, st.session_state.loan_inputs, today)
                 
                 # Calculate sum row
-                total_loan_amount = edited_df['Loan Amount ($)'].sum()
+                total_loan_amount = edited_df['Box Amount ($)'].sum()
                 
                 # Calculate weighted averages
-                # Only include rows with non-zero loan amounts
-                non_zero_df = edited_df[edited_df['Loan Amount ($)'] > 0]
+                # Only include rows with non-zero box amounts
+                non_zero_df = edited_df[edited_df['Box Amount ($)'] > 0]
                 if len(non_zero_df) > 0:
-                    # Weighted average rate (weighted by DTE * Loan Amount)
-                    weighted_sum_rate = (non_zero_df['Rate (%)'] * non_zero_df['DTE'] * non_zero_df['Loan Amount ($)']).sum()
-                    weight_total = (non_zero_df['DTE'] * non_zero_df['Loan Amount ($)']).sum()
+                    # Weighted average rate (weighted by DTE * Box Amount)
+                    weighted_sum_rate = (non_zero_df['Rate (%)'] * non_zero_df['DTE'] * non_zero_df['Box Amount ($)']).sum()
+                    weight_total = (non_zero_df['DTE'] * non_zero_df['Box Amount ($)']).sum()
                     weighted_avg_rate = weighted_sum_rate / weight_total if weight_total > 0 else 0.0
                     
-                    # Weighted average DTE (weighted by Loan Amount)
-                    weighted_sum_dte = (non_zero_df['DTE'] * non_zero_df['Loan Amount ($)']).sum()
-                    loan_total = non_zero_df['Loan Amount ($)'].sum()
+                    # Weighted average DTE (weighted by Box Amount)
+                    weighted_sum_dte = (non_zero_df['DTE'] * non_zero_df['Box Amount ($)']).sum()
+                    loan_total = non_zero_df['Box Amount ($)'].sum()
                     weighted_avg_dte = weighted_sum_dte / loan_total if loan_total > 0 else 0.0
                 else:
                     weighted_avg_rate = 0.0
@@ -580,14 +594,15 @@ if page == "Loan Structure":
 
                 # Display summary statistics below the table
                 render_summary_stats([
-                    ("Total Loan Amount", f"${total_loan_amount:,.0f}"),
-                    ("Weighted Avg Rate", f"{weighted_avg_rate:.2f}%"),
-                    ("Weighted Avg APR", f"{weighted_avg_apr:.2f}%"),
-                    ("Weighted Avg DTE", f"{weighted_avg_dte:.0f}"),
+                    ("Total Box Amount", f"${total_loan_amount:,.0f}"),
+                    ("Weighted Avg Rate*", f"{weighted_avg_rate:.2f}%"),
+                    ("Weighted Avg APR*", f"{weighted_avg_apr:.2f}%"),
+                    ("Weighted Avg DTE*", f"{weighted_avg_dte:.0f}"),
                     ("Total Funded", f"${total_funded_sum:,.0f}"),
-                    ("Total Fees", f"${total_fees_calc:,.0f}"),
+                    ("Total Fees*", f"${total_fees_calc:,.0f}"),
                     ("Net Proceeds", f"${total_net_proceeds:,.0f}"),
                 ])
+                st.caption(summary_stats_footnotes(st.session_state.fee_rate_pct))
             
             with col_chart:
                 st.subheader("Cashflow Schedule*")
@@ -599,11 +614,11 @@ if page == "Loan Structure":
                 loan_amounts_by_date = {}
 
                 for idx, row in edited_df.iterrows():
-                    if row['Loan Amount ($)'] > 0:
+                    if row['Box Amount ($)'] > 0:
                         mat_date = pd.to_datetime(row['Maturity Date']).date()
                         maturity_dates.append(mat_date)
                         net_proceeds_by_date[mat_date] = row['Net Proceeds ($)']
-                        loan_amounts_by_date[mat_date] = row['Loan Amount ($)']
+                        loan_amounts_by_date[mat_date] = row['Box Amount ($)']
 
                 total_net_proceeds_cf = sum(net_proceeds_by_date.values())
 
