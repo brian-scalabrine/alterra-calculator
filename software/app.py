@@ -11,6 +11,16 @@ from data_refresh import (
     format_last_refreshed,
     refresh_yield_data,
 )
+from portfolio import (
+    aggregate_cashflows,
+    aggregate_fee_rate_pct,
+    aggregate_loan_structures,
+    delete_loan,
+    get_loan,
+    list_loans_table,
+    loan_exists,
+    save_loan_snapshot,
+)
 
 
 def round_currency(value):
@@ -60,6 +70,50 @@ def summary_stats_footnotes(fee_rate_pct):
     )
 
 
+def compute_loan_summary_stats(loan_df, fee_rate_pct):
+    """Build summary stat cards from the loan structure table."""
+    summary = compute_loan_summary_dict(loan_df, fee_rate_pct)
+    return [
+        ("Total Box Amount", f"${summary['total_box_amount']:,.0f}"),
+        ("Weighted Avg Rate*", f"{summary['weighted_avg_rate']:.2f}%"),
+        ("Weighted Avg APR*", f"{summary['weighted_avg_apr']:.2f}%"),
+        ("Weighted Avg DTE*", f"{summary['weighted_avg_dte']:.0f}"),
+        ("Total Funded", f"${summary['total_funded']:,.0f}"),
+        ("Total Fees*", f"${summary['total_fees']:,.0f}"),
+        ("Net Proceeds", f"${summary['net_proceeds']:,.0f}"),
+    ]
+
+
+def compute_loan_summary_dict(loan_df, fee_rate_pct):
+    """Numeric summary fields for portfolio storage."""
+    total_box_amount = float(loan_df["Box Amount ($)"].sum())
+    non_zero_df = loan_df[loan_df["Box Amount ($)"] > 0]
+
+    if len(non_zero_df) > 0:
+        weighted_sum_rate = (
+            non_zero_df["Rate (%)"] * non_zero_df["DTE"] * non_zero_df["Box Amount ($)"]
+        ).sum()
+        weight_total = (non_zero_df["DTE"] * non_zero_df["Box Amount ($)"]).sum()
+        weighted_avg_rate = weighted_sum_rate / weight_total if weight_total > 0 else 0.0
+
+        weighted_sum_dte = (non_zero_df["DTE"] * non_zero_df["Box Amount ($)"]).sum()
+        box_total = non_zero_df["Box Amount ($)"].sum()
+        weighted_avg_dte = weighted_sum_dte / box_total if box_total > 0 else 0.0
+    else:
+        weighted_avg_rate = 0.0
+        weighted_avg_dte = 0.0
+
+    return {
+        "total_box_amount": total_box_amount,
+        "weighted_avg_rate": float(weighted_avg_rate),
+        "weighted_avg_apr": float(weighted_avg_rate + fee_rate_pct),
+        "weighted_avg_dte": float(weighted_avg_dte),
+        "total_funded": float(loan_df["Funded Amount ($)"].sum()),
+        "total_fees": float(loan_df["Fee ($)"].sum()),
+        "net_proceeds": float(loan_df["Net Proceeds ($)"].sum()),
+    }
+
+
 def calculate_gross_funded(loan_amount, rate_pct, dte):
     """Gross funded amount before upfront fee."""
     if loan_amount > 0 and rate_pct > 0 and dte > 0:
@@ -84,10 +138,13 @@ def calculate_net_proceeds(funded_amount, dte, annual_fee_rate=None):
     return round_currency(funded_amount - fee)
 
 
-def build_loan_dataframe(df, loan_inputs, today):
+def build_loan_dataframe(df, loan_inputs, today, fee_rate_pct=None):
     """Build the full loan table from session-state box amounts."""
     loan_data = []
-    annual_fee_rate = get_annual_fee_rate()
+    if fee_rate_pct is None:
+        annual_fee_rate = get_annual_fee_rate()
+    else:
+        annual_fee_rate = fee_rate_pct / 100.0
     for _, row in df.iterrows():
         maturity_date = (
             row['Maturity Date'].date()
@@ -113,12 +170,169 @@ def build_loan_dataframe(df, loan_inputs, today):
     return pd.DataFrame(loan_data)
 
 
+def build_cashflow_schedule(loan_df, today):
+    """Build cashflow schedule DataFrame from a loan structure table."""
+    cashflow_data = []
+    maturity_dates = []
+    net_proceeds_by_date = {}
+    loan_amounts_by_date = {}
+
+    for _, row in loan_df.iterrows():
+        if row["Box Amount ($)"] > 0:
+            mat_date = pd.to_datetime(row["Maturity Date"]).date()
+            maturity_dates.append(mat_date)
+            net_proceeds_by_date[mat_date] = row["Net Proceeds ($)"]
+            loan_amounts_by_date[mat_date] = row["Box Amount ($)"]
+
+    total_net_proceeds_cf = sum(net_proceeds_by_date.values())
+
+    all_dates = [today]
+    end_date = max(maturity_dates) if maturity_dates else today + timedelta(days=365 * 5)
+    current_date = today
+    while current_date <= end_date:
+        if current_date.month == 12:
+            first_of_month = datetime(current_date.year + 1, 1, 1).date()
+        else:
+            first_of_month = datetime(current_date.year, current_date.month + 1, 1).date()
+        if first_of_month not in all_dates:
+            all_dates.append(first_of_month)
+        current_date = first_of_month
+
+    for mat_date in maturity_dates:
+        if mat_date not in all_dates:
+            all_dates.append(mat_date)
+
+    all_dates.sort()
+
+    for date in all_dates:
+        if date == today:
+            amount = round_currency(total_net_proceeds_cf)
+        elif date in loan_amounts_by_date:
+            amount = round_currency(-loan_amounts_by_date[date])
+        else:
+            amount = 0.0
+
+        cashflow_data.append({
+            "Date": date.strftime("%Y-%m-%d"),
+            "Amount ($)": amount,
+        })
+
+    return pd.DataFrame(cashflow_data)
+
+
+def render_cashflow_panel(cashflow_df, fee_rate_pct, *, chart_height=400, table_height=800):
+    """Display cashflow table, chart, and fee methodology note."""
+    st.dataframe(
+        cashflow_df,
+        column_config={
+            "Date": st.column_config.TextColumn("Date", disabled=True, width="small"),
+            "Amount ($)": monetary_column("Amount ($)", disabled=True),
+        },
+        use_container_width=True,
+        hide_index=True,
+        height=table_height,
+    )
+
+    dates = [pd.to_datetime(d) for d in cashflow_df["Date"]]
+    amounts = cashflow_df["Amount ($)"].tolist()
+    colors = [
+        "#5EFFAF" if a > 0 else "#E57373" if a < 0 else "#B0BEC5"
+        for a in amounts
+    ]
+
+    fig_cashflow = go.Figure()
+    fig_cashflow.add_trace(go.Bar(
+        x=dates,
+        y=amounts,
+        marker_color=colors,
+        name="Cashflow",
+    ))
+    fig_cashflow.update_layout(
+        xaxis_title="Date",
+        yaxis_title="Amount ($)",
+        height=chart_height,
+        showlegend=False,
+        **alterra_chart_layout(title="Cashflow Schedule*"),
+        xaxis=dict(showgrid=True, gridwidth=1, gridcolor="rgba(10,22,20,0.08)"),
+        yaxis=dict(showgrid=True, gridwidth=1, gridcolor="rgba(10,22,20,0.08)"),
+    )
+    st.plotly_chart(fig_cashflow, use_container_width=True)
+    st.caption(fee_methodology_note(fee_rate_pct))
+
+
+def persist_loan_to_portfolio(loan_number, client, loan_df, cashflow_df, fee_rate_pct, as_of_date):
+    """Save a loan structure snapshot to the portfolio."""
+    save_loan_snapshot(
+        loan_number,
+        client=client.strip(),
+        fee_rate_pct=fee_rate_pct,
+        as_of_date=as_of_date.isoformat(),
+        loan_structure=loan_df,
+        cashflow=cashflow_df,
+        summary=compute_loan_summary_dict(loan_df, fee_rate_pct),
+    )
+
+
+def parse_loan_number(loan_number_input):
+    """
+    Validate Loan # as a positive integer string (no decimals).
+    Returns (loan_number_str, error_message).
+    """
+    if loan_number_input is None:
+        return None, "Enter a Loan # before saving."
+
+    if isinstance(loan_number_input, float):
+        if not loan_number_input.is_integer():
+            return None, "Loan # must be a whole number (no decimals)."
+        loan_number_input = int(loan_number_input)
+    elif isinstance(loan_number_input, str):
+        loan_number_input = loan_number_input.strip()
+        if not loan_number_input:
+            return None, "Enter a Loan # before saving."
+        if "." in loan_number_input:
+            return None, "Loan # must be a whole number (no decimals)."
+        try:
+            loan_number_input = int(loan_number_input)
+        except ValueError:
+            return None, "Loan # must be a whole number."
+    elif isinstance(loan_number_input, int):
+        pass
+    else:
+        return None, "Loan # must be a whole number."
+
+    if loan_number_input < 1:
+        return None, "Loan # must be a positive whole number."
+
+    return str(loan_number_input), None
+
+
+ALTERRA_TITLE_FONT = "Bodoni MT, Libre Bodoni, serif"
 ALTERRA_CHART_LAYOUT = dict(
-    paper_bgcolor="#E8FDF9",
+    paper_bgcolor="#FFFFFF",
     plot_bgcolor="#FFFFFF",
     font=dict(family="DM Sans, sans-serif", color="#1a2e2a", size=12),
-    title_font=dict(family="PT Serif, serif", color="#0a1614", size=16),
 )
+
+
+def alterra_chart_layout(*, title=None):
+    """Plotly layout defaults; only include title_font when a title is set."""
+    layout = dict(ALTERRA_CHART_LAYOUT)
+    if title:
+        layout["title"] = title
+        layout["title_font"] = dict(
+            family=ALTERRA_TITLE_FONT, color="#0a1614", size=16
+        )
+    return layout
+
+
+def alterra_brand_title_html(*, sidebar=False):
+    """Brand wordmark: Bodoni MT, all lowercase."""
+    size = "1.35rem" if sidebar else "1.75rem"
+    margin = "margin: 0 0 0.5rem 0;" if sidebar else "margin: 0 0 1rem 0;"
+    return (
+        f'<p class="alterra-brand-title" style="font-size: {size}; {margin}">'
+        "alterra</p>"
+    )
 
 
 def render_summary_stats(stats):
@@ -168,7 +382,7 @@ def require_auth():
         """,
         unsafe_allow_html=True,
     )
-    st.title("Alterra")
+    st.markdown(alterra_brand_title_html(), unsafe_allow_html=True)
     st.caption("Sign in to access the lending calculator.")
     password = st.text_input("Password", type="password", key="login_password")
     if st.button("Sign in", type="primary"):
@@ -214,13 +428,19 @@ if 'current_page' not in st.session_state:
 if 'fee_rate_pct' not in st.session_state:
     st.session_state.fee_rate_pct = DEFAULT_FEE_RATE_PCT
 
+if "portfolio_overwrite_loan" not in st.session_state:
+    st.session_state.portfolio_overwrite_loan = None
+
+if "portfolio_delete_confirm" not in st.session_state:
+    st.session_state.portfolio_delete_confirm = None
+
 # Alterra brand styling (meetalterra.com)
 st.markdown("""
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,400;0,500;0,700;1,400&family=PT+Serif:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,400;0,500;0,700;1,400&family=Libre+Bodoni:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
 <style>
     :root {
-        --alterra-bg: #E8FDF9;
+        --alterra-bg: #FFFFFF;
         --alterra-accent: #5EFFAF;
         --alterra-dark: #0a1614;
         --alterra-text: #1a2e2a;
@@ -228,6 +448,7 @@ st.markdown("""
         --alterra-input: #BFDBFE;
         --alterra-input-border: #2563EB;
         --alterra-card: #FFFFFF;
+        --alterra-title-font: 'Bodoni MT', 'Libre Bodoni', serif;
     }
 
     html, body, [class*="css"] {
@@ -244,10 +465,18 @@ st.markdown("""
         padding-top: 1.5rem;
     }
 
-    h1, h2, h3, [data-testid="stSidebar"] h1 {
-        font-family: 'PT Serif', serif !important;
+    h1, h2, h3,
+    [data-testid="stSidebar"] h1 {
+        font-family: var(--alterra-title-font) !important;
         color: var(--alterra-dark) !important;
         font-weight: 700 !important;
+    }
+
+    .alterra-brand-title {
+        font-family: var(--alterra-title-font) !important;
+        color: var(--alterra-dark) !important;
+        font-weight: 700 !important;
+        text-transform: lowercase !important;
     }
 
     h1 { font-size: 1.75rem !important; }
@@ -312,7 +541,7 @@ st.markdown("""
         flex: 1 1 120px;
         min-width: 110px;
         padding: 10px 12px;
-        background: var(--alterra-bg);
+        background: #F8F9FA;
         border-radius: 8px;
         border: 1px solid rgba(94, 255, 175, 0.45);
         text-align: center;
@@ -397,13 +626,18 @@ st.markdown("""
 
 # Navigation sidebar
 with st.sidebar:
-    st.title("Alterra")
+    st.markdown(alterra_brand_title_html(sidebar=True), unsafe_allow_html=True)
     st.markdown("---")
     
     # Navigation buttons
     if st.button("Loan Structure", use_container_width=True, 
                  type="primary" if st.session_state.current_page == "Loan Structure" else "secondary"):
         st.session_state.current_page = "Loan Structure"
+        st.rerun()
+
+    if st.button("Portfolio", use_container_width=True,
+                 type="primary" if st.session_state.current_page == "Portfolio" else "secondary"):
+        st.session_state.current_page = "Portfolio"
         st.rerun()
     
     if st.button("Term Structure", use_container_width=True,
@@ -463,7 +697,7 @@ if page == "Loan Structure":
             if date_str not in st.session_state.loan_inputs:
                 st.session_state.loan_inputs[date_str] = 0.0
 
-        fee_col, _ = st.columns([1, 3])
+        fee_col, _ = st.columns([1, 7])
         with fee_col:
             fee_rate_pct = st.number_input(
                 "Annual Fee Rate (%)",
@@ -482,7 +716,80 @@ if page == "Loan Structure":
         loan_df = build_loan_dataframe(df, st.session_state.loan_inputs, today)
 
         if not loan_df.empty:
-            
+            render_summary_stats(
+                compute_loan_summary_stats(loan_df, st.session_state.fee_rate_pct)
+            )
+
+            with st.container(border=True):
+                st.markdown("**Save to Portfolio**")
+                save_col1, save_col2 = st.columns([1, 3])
+                with save_col1:
+                    loan_number_input = st.number_input(
+                        "Loan #",
+                        min_value=1,
+                        step=1,
+                        format="%d",
+                        key="portfolio_loan_number_input",
+                    )
+                    client_input = st.text_input(
+                        "Client",
+                        key="portfolio_client_input",
+                    )
+                with save_col2:
+                    st.caption(
+                        "Enter a whole-number Loan # and client name, then save this "
+                        "structure to the Portfolio tab."
+                    )
+
+                save_clicked = st.button("Save to Portfolio", type="primary")
+
+                if save_clicked:
+                    loan_number, loan_number_error = parse_loan_number(loan_number_input)
+                    if loan_number_error:
+                        st.error(loan_number_error)
+                    elif loan_df["Box Amount ($)"].sum() <= 0:
+                        st.error("Add at least one Box Amount before saving to the Portfolio.")
+                    elif loan_exists(loan_number):
+                        st.session_state.portfolio_overwrite_loan = loan_number
+                    else:
+                        cashflow_to_save = build_cashflow_schedule(loan_df, today)
+                        persist_loan_to_portfolio(
+                            loan_number,
+                            client_input,
+                            loan_df,
+                            cashflow_to_save,
+                            st.session_state.fee_rate_pct,
+                            today,
+                        )
+                        st.success(f"Loan #{loan_number} saved to Portfolio.")
+                        st.session_state.portfolio_overwrite_loan = None
+
+                if st.session_state.portfolio_overwrite_loan:
+                    overwrite_loan = st.session_state.portfolio_overwrite_loan
+                    st.warning(
+                        f"Loan **#{overwrite_loan}** already exists in the Portfolio. "
+                        "Overwrite it with the current Loan Structure?"
+                    )
+                    confirm_col, cancel_col = st.columns(2)
+                    with confirm_col:
+                        if st.button("Yes, overwrite existing loan", type="primary"):
+                            cashflow_to_save = build_cashflow_schedule(loan_df, today)
+                            persist_loan_to_portfolio(
+                                overwrite_loan,
+                                client_input,
+                                loan_df,
+                                cashflow_to_save,
+                                st.session_state.fee_rate_pct,
+                                today,
+                            )
+                            st.session_state.portfolio_overwrite_loan = None
+                            st.success(f"Loan #{overwrite_loan} updated in Portfolio.")
+                            st.rerun()
+                    with cancel_col:
+                        if st.button("Cancel overwrite"):
+                            st.session_state.portfolio_overwrite_loan = None
+                            st.rerun()
+
             # Create two columns: table on left, cashflow chart on right
             col_table, col_chart = st.columns([1.5, 1])
             
@@ -549,6 +856,8 @@ if page == "Loan Structure":
                     key="loan_structure_editor",
                     )
 
+                st.caption(summary_stats_footnotes(st.session_state.fee_rate_pct))
+
                 loan_inputs_changed = False
                 for _, row in edited_df.iterrows():
                     date_str = row['Maturity Date']
@@ -565,140 +874,128 @@ if page == "Loan Structure":
                     st.rerun()
 
                 edited_df = build_loan_dataframe(df, st.session_state.loan_inputs, today)
-                
-                # Calculate sum row
-                total_loan_amount = edited_df['Box Amount ($)'].sum()
-                
-                # Calculate weighted averages
-                # Only include rows with non-zero box amounts
-                non_zero_df = edited_df[edited_df['Box Amount ($)'] > 0]
-                if len(non_zero_df) > 0:
-                    # Weighted average rate (weighted by DTE * Box Amount)
-                    weighted_sum_rate = (non_zero_df['Rate (%)'] * non_zero_df['DTE'] * non_zero_df['Box Amount ($)']).sum()
-                    weight_total = (non_zero_df['DTE'] * non_zero_df['Box Amount ($)']).sum()
-                    weighted_avg_rate = weighted_sum_rate / weight_total if weight_total > 0 else 0.0
-                    
-                    # Weighted average DTE (weighted by Box Amount)
-                    weighted_sum_dte = (non_zero_df['DTE'] * non_zero_df['Box Amount ($)']).sum()
-                    loan_total = non_zero_df['Box Amount ($)'].sum()
-                    weighted_avg_dte = weighted_sum_dte / loan_total if loan_total > 0 else 0.0
-                else:
-                    weighted_avg_rate = 0.0
-                    weighted_avg_dte = 0.0
-
-                weighted_avg_apr = weighted_avg_rate + st.session_state.fee_rate_pct
-                
-                total_funded_sum = edited_df['Funded Amount ($)'].sum()
-                total_fees_calc = edited_df['Fee ($)'].sum()
-                total_net_proceeds = edited_df['Net Proceeds ($)'].sum()
-
-                # Display summary statistics below the table
-                render_summary_stats([
-                    ("Total Box Amount", f"${total_loan_amount:,.0f}"),
-                    ("Weighted Avg Rate*", f"{weighted_avg_rate:.2f}%"),
-                    ("Weighted Avg APR*", f"{weighted_avg_apr:.2f}%"),
-                    ("Weighted Avg DTE*", f"{weighted_avg_dte:.0f}"),
-                    ("Total Funded", f"${total_funded_sum:,.0f}"),
-                    ("Total Fees*", f"${total_fees_calc:,.0f}"),
-                    ("Net Proceeds", f"${total_net_proceeds:,.0f}"),
-                ])
-                st.caption(summary_stats_footnotes(st.session_state.fee_rate_pct))
             
             with col_chart:
                 st.subheader("Cashflow Schedule*")
-
-                # Build cashflow schedule (today + maturity dates only; fees netted at funding)
-                cashflow_data = []
-                maturity_dates = []
-                net_proceeds_by_date = {}
-                loan_amounts_by_date = {}
-
-                for idx, row in edited_df.iterrows():
-                    if row['Box Amount ($)'] > 0:
-                        mat_date = pd.to_datetime(row['Maturity Date']).date()
-                        maturity_dates.append(mat_date)
-                        net_proceeds_by_date[mat_date] = row['Net Proceeds ($)']
-                        loan_amounts_by_date[mat_date] = row['Box Amount ($)']
-
-                total_net_proceeds_cf = sum(net_proceeds_by_date.values())
-
-                all_dates = [today]
-                end_date = max(maturity_dates) if maturity_dates else today + timedelta(days=365 * 5)
-                current_date = today
-                while current_date <= end_date:
-                    if current_date.month == 12:
-                        first_of_month = datetime(current_date.year + 1, 1, 1).date()
-                    else:
-                        first_of_month = datetime(current_date.year, current_date.month + 1, 1).date()
-                    if first_of_month not in all_dates:
-                        all_dates.append(first_of_month)
-                    current_date = first_of_month
-
-                for mat_date in maturity_dates:
-                    if mat_date not in all_dates:
-                        all_dates.append(mat_date)
-
-                all_dates.sort()
-
-                for date in all_dates:
-                    if date == today:
-                        amount = round_currency(total_net_proceeds_cf)
-                    elif date in loan_amounts_by_date:
-                        amount = round_currency(-loan_amounts_by_date[date])
-                    else:
-                        amount = 0.0
-
-                    cashflow_data.append({
-                        'Date': date.strftime('%Y-%m-%d'),
-                        'Amount ($)': amount
-                    })
-                
-                cashflow_df = pd.DataFrame(cashflow_data)
-                
-                # Display cashflow schedule
-                st.dataframe(
-                    cashflow_df,
-                    column_config={
-                        "Date": st.column_config.TextColumn("Date", disabled=True, width="small"),
-                        "Amount ($)": monetary_column("Amount ($)", disabled=True),
-                    },
-                    use_container_width=True,
-                    hide_index=True,
-                    height=800
-                )
-                
-                # Also create a chart visualization
-                fig_cashflow = go.Figure()
-                
-                dates = [pd.to_datetime(d['Date']) for d in cashflow_data]
-                amounts = [d['Amount ($)'] for d in cashflow_data]
-                
-                colors = [
-                    '#5EFFAF' if a > 0 else '#E57373' if a < 0 else '#B0BEC5'
-                    for a in amounts
-                ]
-                
-                fig_cashflow.add_trace(go.Bar(
-                    x=dates,
-                    y=amounts,
-                    marker_color=colors,
-                    name='Cashflow'
-                ))
-                
-                fig_cashflow.update_layout(
-                    title="Cashflow Schedule*",
-                    xaxis_title="Date",
-                    yaxis_title="Amount ($)",
-                    height=400,
-                    showlegend=False,
-                    **ALTERRA_CHART_LAYOUT,
-                    xaxis=dict(showgrid=True, gridwidth=1, gridcolor='rgba(10,22,20,0.08)'),
-                    yaxis=dict(showgrid=True, gridwidth=1, gridcolor='rgba(10,22,20,0.08)'),
-                )
-
-                st.plotly_chart(fig_cashflow, use_container_width=True)
-                st.caption(fee_methodology_note(st.session_state.fee_rate_pct))
+                cashflow_df = build_cashflow_schedule(edited_df, today)
+                render_cashflow_panel(cashflow_df, st.session_state.fee_rate_pct)
     
+elif page == "Portfolio":
+    st.title("Portfolio")
+
+    portfolio_df = list_loans_table()
+
+    if portfolio_df.empty:
+        st.info(
+            "No loans saved yet. Build a structure on **Loan Structure** and use "
+            "**Save to Portfolio** to add one here."
+        )
+    else:
+        st.dataframe(
+            portfolio_df,
+            column_config={
+                "Loan #": st.column_config.TextColumn("Loan #", disabled=True),
+                "Client": st.column_config.TextColumn("Client", disabled=True),
+                "Saved": st.column_config.TextColumn("Saved", disabled=True),
+                "Total Box Amount": monetary_column("Total Box Amount", disabled=True),
+                "Weighted Avg Rate": st.column_config.NumberColumn(
+                    "Weighted Avg Rate", disabled=True, format="%.2f%%"
+                ),
+                "Weighted Avg APR": st.column_config.NumberColumn(
+                    "Weighted Avg APR", disabled=True, format="%.2f%%"
+                ),
+                "Weighted Avg DTE": st.column_config.NumberColumn(
+                    "Weighted Avg DTE", disabled=True, format="%d"
+                ),
+                "Total Funded": monetary_column("Total Funded", disabled=True),
+                "Total Fees": monetary_column("Total Fees", disabled=True),
+                "Net Proceeds": monetary_column("Net Proceeds", disabled=True),
+            },
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        with st.container(border=True):
+            st.markdown("**Remove from Portfolio**")
+            delete_col1, delete_col2 = st.columns([1, 3])
+            loan_numbers = portfolio_df["Loan #"].tolist()
+            with delete_col1:
+                loan_to_delete = st.selectbox(
+                    "Loan #",
+                    loan_numbers,
+                    key="portfolio_delete_select",
+                )
+            with delete_col2:
+                st.caption("Permanently remove a saved loan from the Portfolio.")
+
+            if st.button("Delete from Portfolio", type="secondary"):
+                st.session_state.portfolio_delete_confirm = loan_to_delete
+
+            if st.session_state.portfolio_delete_confirm:
+                pending_delete = st.session_state.portfolio_delete_confirm
+                st.warning(f"Delete Loan **#{pending_delete}** from the Portfolio? This cannot be undone.")
+                confirm_delete_col, cancel_delete_col = st.columns(2)
+                with confirm_delete_col:
+                    if st.button("Yes, delete loan", type="primary"):
+                        delete_loan(pending_delete)
+                        st.session_state.portfolio_delete_confirm = None
+                        st.success(f"Loan #{pending_delete} removed from Portfolio.")
+                        st.rerun()
+                with cancel_delete_col:
+                    if st.button("Cancel delete"):
+                        st.session_state.portfolio_delete_confirm = None
+                        st.rerun()
+
+        st.markdown("---")
+        st.subheader("Cashflow Schedules")
+
+        cashflow_options = ["Aggregate"] + [f"Loan #{n}" for n in loan_numbers]
+        selected_cashflow = st.selectbox(
+            "View cashflow",
+            cashflow_options,
+            key="portfolio_cashflow_select",
+        )
+
+        if selected_cashflow == "Aggregate":
+            combined_structure = aggregate_loan_structures()
+            aggregate_fee = aggregate_fee_rate_pct()
+            st.caption("Combined cashflows and summary totals across all saved loans.")
+            if not combined_structure.empty:
+                render_summary_stats(
+                    compute_loan_summary_stats(combined_structure, aggregate_fee)
+                )
+            cashflow_df = aggregate_cashflows()
+            render_cashflow_panel(
+                cashflow_df,
+                aggregate_fee,
+                chart_height=350,
+                table_height=400,
+            )
+        else:
+            loan_number = selected_cashflow.replace("Loan #", "")
+            loan = get_loan(loan_number)
+            if loan:
+                client_name = loan.get("client", "")
+                client_label = f" · Client: {client_name}" if client_name else ""
+                st.caption(
+                    f"Saved {loan.get('saved_at', '')[:16].replace('T', ' ')} · "
+                    f"As of {loan.get('as_of_date', '')} · "
+                    f"Fee rate {loan.get('fee_rate_pct', 0):.2f}%{client_label}"
+                )
+                render_summary_stats(
+                    compute_loan_summary_stats(
+                        pd.DataFrame(loan["loan_structure"]),
+                        loan.get("fee_rate_pct", DEFAULT_FEE_RATE_PCT),
+                    )
+                )
+                cashflow_df = pd.DataFrame(loan["cashflow"])
+                render_cashflow_panel(
+                    cashflow_df,
+                    loan.get("fee_rate_pct", DEFAULT_FEE_RATE_PCT),
+                    chart_height=350,
+                    table_height=400,
+                )
+
 elif page == "Term Structure":
     st.title("Term Structure")
     

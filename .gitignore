@@ -1,7 +1,6 @@
 # Local secrets — never commit (see software/.streamlit/secrets.toml.example)
 software/.streamlit/secrets.toml
-
-# Python
+software/portfolio.json
 __pycache__/
 *.py[cod]
 .venv/
