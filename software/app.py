@@ -633,18 +633,20 @@ st.markdown("""
         font-weight: 500;
     }
 
-    /* Visible borders for text/number input boxes */
-    [data-testid="stTextInput"] [data-baseweb="input"],
-    [data-testid="stTextInput"] [data-baseweb="base-input"],
-    [data-testid="stNumberInput"] [data-baseweb="input"],
-    [data-testid="stNumberInput"] [data-baseweb="base-input"] {
-        border: 1px solid rgba(10, 22, 20, 0.35) !important;
+    /* Visible borders for text/number input boxes.
+       High-specificity (.stApp prefix) is required to beat Streamlit's
+       emotion classes, which set a white border on a white background. */
+    .stApp [data-testid="stTextInput"] [data-testid="stTextInputRootElement"],
+    .stApp [data-testid="stNumberInput"] [data-testid="stNumberInputContainer"],
+    .stApp [data-testid="stNumberInput"] [data-baseweb="input"] {
+        border: 1px solid #64748B !important;
         border-radius: 6px !important;
         background-color: #FFFFFF !important;
     }
 
-    [data-testid="stTextInput"] [data-baseweb="input"]:focus-within,
-    [data-testid="stNumberInput"] [data-baseweb="input"]:focus-within {
+    .stApp [data-testid="stTextInput"] [data-testid="stTextInputRootElement"]:focus-within,
+    .stApp [data-testid="stNumberInput"] [data-testid="stNumberInputContainer"]:focus-within,
+    .stApp [data-testid="stNumberInput"] [data-baseweb="input"]:focus-within {
         border-color: var(--alterra-input-border) !important;
         box-shadow: 0 0 0 1px var(--alterra-input-border) !important;
     }
