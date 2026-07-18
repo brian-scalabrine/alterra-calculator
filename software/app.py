@@ -59,11 +59,11 @@ def fee_methodology_note(fee_rate_pct):
 def summary_stats_footnotes(fee_rate_pct):
     """Footnotes for summary stats marked with an asterisk."""
     return (
-        "* Weighted Avg Rate: Σ(Rate × DTE × Box Amount) ÷ Σ(DTE × Box Amount), "
+        "* Wtd Avg Rate: Σ(Rate × DTE × Box Amount) ÷ Σ(DTE × Box Amount), "
         "rows with Box Amount > 0 only.\n\n"
-        "* Weighted Avg APR: Weighted Avg Rate + Annual Fee Rate "
+        "* Wtd Avg APR: Wtd Avg Rate + Annual Fee Rate "
         f"({fee_rate_pct:.2f}%).\n\n"
-        "* Weighted Avg DTE: Σ(DTE × Box Amount) ÷ Σ(Box Amount), "
+        "* Wtd Avg DTE: Σ(DTE × Box Amount) ÷ Σ(Box Amount), "
         "rows with Box Amount > 0 only.\n\n"
         f"* Total Fees: Sum of upfront fees per row (Annual Fee Rate {fee_rate_pct:.2f}% "
         "× DTE ÷ 365 × Funded Amount)."
@@ -75,9 +75,9 @@ def compute_loan_summary_stats(loan_df, fee_rate_pct):
     summary = compute_loan_summary_dict(loan_df, fee_rate_pct)
     return [
         ("Total Box Amount", f"${summary['total_box_amount']:,.0f}"),
-        ("Weighted Avg Rate*", f"{summary['weighted_avg_rate']:.2f}%"),
-        ("Weighted Avg APR*", f"{summary['weighted_avg_apr']:.2f}%"),
-        ("Weighted Avg DTE*", f"{summary['weighted_avg_dte']:.0f}"),
+        ("Wtd Avg Rate*", f"{summary['weighted_avg_rate']:.2f}%"),
+        ("Wtd Avg APR*", f"{summary['weighted_avg_apr']:.2f}%"),
+        ("Wtd Avg DTE*", f"{summary['weighted_avg_dte']:.0f}"),
         ("Total Funded", f"${summary['total_funded']:,.0f}"),
         ("Total Fees*", f"${summary['total_fees']:,.0f}"),
         ("Net Proceeds", f"${summary['net_proceeds']:,.0f}"),
@@ -346,6 +346,117 @@ def render_summary_stats(stats):
     )
     st.markdown(f'<div class="summary-stats-row">{cards}</div>', unsafe_allow_html=True)
 
+
+@st.dialog("Delete from Portfolio")
+def portfolio_delete_dialog(loan_number: str):
+    """Confirm loan deletion in a modal popup."""
+    st.markdown(
+        f"Delete Loan **#{loan_number}** from the Portfolio? "
+        "This cannot be undone."
+    )
+    confirm_col, cancel_col = st.columns(2)
+    with confirm_col:
+        if st.button(
+            "Yes, delete loan",
+            type="primary",
+            use_container_width=True,
+            key=f"dialog_confirm_delete_{loan_number}",
+        ):
+            delete_loan(loan_number)
+            st.session_state.portfolio_delete_message = (
+                f"Loan #{loan_number} removed from Portfolio."
+            )
+            st.rerun()
+    with cancel_col:
+        if st.button(
+            "Cancel",
+            use_container_width=True,
+            key=f"dialog_cancel_delete_{loan_number}",
+        ):
+            st.rerun()
+
+
+def render_portfolio_table(portfolio_df):
+    """Render portfolio loans as a table with a delete button on each row."""
+    st.markdown(
+        """
+        <style>
+            .portfolio-table-header {
+                font-size: 0.72rem;
+                font-weight: 600;
+                color: #4a635e;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+                padding: 8px 4px;
+                border-bottom: 1px solid rgba(10, 22, 20, 0.12);
+            }
+            .portfolio-table-cell {
+                font-size: 0.82rem;
+                color: #1a2e2a;
+                padding: 10px 4px;
+                border-bottom: 1px solid rgba(10, 22, 20, 0.06);
+                font-variant-numeric: tabular-nums;
+            }
+            [class*="st-key-portfolio_delete_"] button[kind="secondary"] {
+                background-color: #C62828 !important;
+                color: #FFFFFF !important;
+                border-color: #C62828 !important;
+                font-size: 0.72rem !important;
+                padding: 0.1rem 0.5rem !important;
+                min-height: 1.35rem !important;
+                height: 1.35rem !important;
+            }
+            [class*="st-key-portfolio_delete_"] button[kind="secondary"]:hover {
+                background-color: #B71C1C !important;
+                border-color: #B71C1C !important;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col_widths = [0.55, 1.0, 1.15, 1.05, 0.85, 0.85, 0.7, 0.95, 0.85, 0.95, 0.55]
+    headers = [
+        "Loan #",
+        "Client",
+        "Saved",
+        "Total Box Amount",
+        "Wtd Avg Rate",
+        "Wtd Avg APR",
+        "Wtd Avg DTE",
+        "Total Funded",
+        "Total Fees",
+        "Net Proceeds",
+        "",
+    ]
+
+    header_cols = st.columns(col_widths)
+    for col, label in zip(header_cols, headers):
+        col.markdown(f'<div class="portfolio-table-header">{label}</div>', unsafe_allow_html=True)
+
+    for _, row in portfolio_df.iterrows():
+        loan_number = str(row["Loan #"])
+        row_cols = st.columns(col_widths)
+        values = [
+            loan_number,
+            row.get("Client", "") or "—",
+            row.get("Saved", ""),
+            f"${row['Total Box Amount']:,.0f}",
+            f"{row['Wtd Avg Rate']:.2f}%",
+            f"{row['Wtd Avg APR']:.2f}%",
+            f"{int(row['Wtd Avg DTE'])}",
+            f"${row['Total Funded']:,.0f}",
+            f"${row['Total Fees']:,.0f}",
+            f"${row['Net Proceeds']:,.0f}",
+        ]
+
+        for col, value in zip(row_cols[:-1], values):
+            col.markdown(f'<div class="portfolio-table-cell">{value}</div>', unsafe_allow_html=True)
+
+        with row_cols[-1]:
+            if st.button("Delete", key=f"portfolio_delete_{loan_number}", use_container_width=True):
+                portfolio_delete_dialog(loan_number)
+
 # Page configuration
 st.set_page_config(
     page_title="Alterra",
@@ -431,9 +542,6 @@ if 'fee_rate_pct' not in st.session_state:
 if "portfolio_overwrite_loan" not in st.session_state:
     st.session_state.portfolio_overwrite_loan = None
 
-if "portfolio_delete_confirm" not in st.session_state:
-    st.session_state.portfolio_delete_confirm = None
-
 # Alterra brand styling (meetalterra.com)
 st.markdown("""
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -518,10 +626,27 @@ st.markdown("""
         border-color: #16302c;
     }
 
-    [data-testid="stNumberInput"] label {
+    [data-testid="stNumberInput"] label,
+    [data-testid="stTextInput"] label {
         font-family: 'DM Sans', sans-serif;
         color: var(--alterra-dark);
         font-weight: 500;
+    }
+
+    /* Visible borders for text/number input boxes */
+    [data-testid="stTextInput"] [data-baseweb="input"],
+    [data-testid="stTextInput"] [data-baseweb="base-input"],
+    [data-testid="stNumberInput"] [data-baseweb="input"],
+    [data-testid="stNumberInput"] [data-baseweb="base-input"] {
+        border: 1px solid rgba(10, 22, 20, 0.35) !important;
+        border-radius: 6px !important;
+        background-color: #FFFFFF !important;
+    }
+
+    [data-testid="stTextInput"] [data-baseweb="input"]:focus-within,
+    [data-testid="stNumberInput"] [data-baseweb="input"]:focus-within {
+        border-color: var(--alterra-input-border) !important;
+        box-shadow: 0 0 0 1px var(--alterra-input-border) !important;
     }
 
     /* Summary stats bar */
@@ -720,8 +845,10 @@ if page == "Loan Structure":
                 compute_loan_summary_stats(loan_df, st.session_state.fee_rate_pct)
             )
 
-            with st.container(border=True):
-                st.markdown("**Save to Portfolio**")
+            with st.expander(
+                "Save to Portfolio",
+                expanded=bool(st.session_state.portfolio_overwrite_loan),
+            ):
                 save_col1, save_col2 = st.columns([1, 3])
                 with save_col1:
                     loan_number_input = st.number_input(
@@ -883,6 +1010,10 @@ if page == "Loan Structure":
 elif page == "Portfolio":
     st.title("Portfolio")
 
+    if st.session_state.get("portfolio_delete_message"):
+        st.success(st.session_state.portfolio_delete_message)
+        del st.session_state.portfolio_delete_message
+
     portfolio_df = list_loans_table()
 
     if portfolio_df.empty:
@@ -891,70 +1022,27 @@ elif page == "Portfolio":
             "**Save to Portfolio** to add one here."
         )
     else:
-        st.dataframe(
-            portfolio_df,
-            column_config={
-                "Loan #": st.column_config.TextColumn("Loan #", disabled=True),
-                "Client": st.column_config.TextColumn("Client", disabled=True),
-                "Saved": st.column_config.TextColumn("Saved", disabled=True),
-                "Total Box Amount": monetary_column("Total Box Amount", disabled=True),
-                "Weighted Avg Rate": st.column_config.NumberColumn(
-                    "Weighted Avg Rate", disabled=True, format="%.2f%%"
-                ),
-                "Weighted Avg APR": st.column_config.NumberColumn(
-                    "Weighted Avg APR", disabled=True, format="%.2f%%"
-                ),
-                "Weighted Avg DTE": st.column_config.NumberColumn(
-                    "Weighted Avg DTE", disabled=True, format="%d"
-                ),
-                "Total Funded": monetary_column("Total Funded", disabled=True),
-                "Total Fees": monetary_column("Total Fees", disabled=True),
-                "Net Proceeds": monetary_column("Net Proceeds", disabled=True),
-            },
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        with st.container(border=True):
-            st.markdown("**Remove from Portfolio**")
-            delete_col1, delete_col2 = st.columns([1, 3])
-            loan_numbers = portfolio_df["Loan #"].tolist()
-            with delete_col1:
-                loan_to_delete = st.selectbox(
-                    "Loan #",
-                    loan_numbers,
-                    key="portfolio_delete_select",
-                )
-            with delete_col2:
-                st.caption("Permanently remove a saved loan from the Portfolio.")
-
-            if st.button("Delete from Portfolio", type="secondary"):
-                st.session_state.portfolio_delete_confirm = loan_to_delete
-
-            if st.session_state.portfolio_delete_confirm:
-                pending_delete = st.session_state.portfolio_delete_confirm
-                st.warning(f"Delete Loan **#{pending_delete}** from the Portfolio? This cannot be undone.")
-                confirm_delete_col, cancel_delete_col = st.columns(2)
-                with confirm_delete_col:
-                    if st.button("Yes, delete loan", type="primary"):
-                        delete_loan(pending_delete)
-                        st.session_state.portfolio_delete_confirm = None
-                        st.success(f"Loan #{pending_delete} removed from Portfolio.")
-                        st.rerun()
-                with cancel_delete_col:
-                    if st.button("Cancel delete"):
-                        st.session_state.portfolio_delete_confirm = None
-                        st.rerun()
+        render_portfolio_table(portfolio_df)
 
         st.markdown("---")
         st.subheader("Cashflow Schedules")
 
-        cashflow_options = ["Aggregate"] + [f"Loan #{n}" for n in loan_numbers]
-        selected_cashflow = st.selectbox(
-            "View cashflow",
-            cashflow_options,
-            key="portfolio_cashflow_select",
-        )
+        cashflow_labels = ["Aggregate"]
+        cashflow_label_to_loan = {"Aggregate": None}
+        for _, row in portfolio_df.iterrows():
+            loan_num = str(row["Loan #"])
+            client = row.get("Client", "") or "—"
+            label = f"{loan_num} / {client}"
+            cashflow_labels.append(label)
+            cashflow_label_to_loan[label] = loan_num
+
+        cf_col, _ = st.columns([1, 4])
+        with cf_col:
+            selected_cashflow = st.selectbox(
+                "View cashflow",
+                cashflow_labels,
+                key="portfolio_cashflow_select",
+            )
 
         if selected_cashflow == "Aggregate":
             combined_structure = aggregate_loan_structures()
@@ -972,7 +1060,7 @@ elif page == "Portfolio":
                 table_height=400,
             )
         else:
-            loan_number = selected_cashflow.replace("Loan #", "")
+            loan_number = cashflow_label_to_loan[selected_cashflow]
             loan = get_loan(loan_number)
             if loan:
                 client_name = loan.get("client", "")
